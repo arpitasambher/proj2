@@ -1,1 +1,316 @@
 
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+import tensorflow as tf
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras import layers, models, optimizers, callbacks
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import os
+from PIL import Image
+import sys
+import datetime
+import subprocess
+import random
+from IPython.display import clear_output
+from tensorflow.keras.callbacks import Callback
+import subprocess
+import matplotlib.pyplot as plt
+from IPython.display import clear_output
+from tensorflow.keras.utils import Sequence
+import random
+
+
+class LiveResourceMonitor(Callback):
+    def _init_(self):
+        super()._init_()
+        self.gpu_memory = []
+        self.cpu_memory = []
+        self.epochs = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        # GPU Memory
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,nounits,noheader"],
+                capture_output=True, text=True
+            )
+            gpu_used = int(result.stdout.strip().split('\n')[0])
+        except:
+            gpu_used = 0
+
+        # CPU Memory
+        try:
+            result = subprocess.run(
+                ["free", "-m"],
+                capture_output=True, text=True
+            )
+            lines = result.stdout.split('\n')
+            mem_line = lines[1].split()
+            cpu_used = int(mem_line[2])  # Used in MiB
+        except:
+            cpu_used = 0
+
+        # Track & Plot
+        self.epochs.append(epoch + 1)
+        self.gpu_memory.append(gpu_used)
+        self.cpu_memory.append(cpu_used)
+
+        clear_output(wait=True)
+        plt.figure(figsize=(10, 4))
+
+        plt.subplot(1, 2, 1)
+        plt.plot(self.epochs, self.gpu_memory, 'o-', label='GPU Mem (MiB)')
+        plt.title("GPU Memory Usage")
+        plt.xlabel("Epoch")
+        plt.ylabel("Memory (MiB)")
+        plt.grid(True)
+
+        plt.subplot(1, 2, 2)
+        plt.plot(self.epochs, self.cpu_memory, 'o-', color='orange', label='CPU Mem (MiB)')
+        plt.title("CPU Memory Usage")
+        plt.xlabel("Epoch")
+        plt.ylabel("Memory (MiB)")
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.show()
+
+# ----------------------------
+# Live Training Plot Callback
+# ----------------------------
+class LivePlotCallback(tf.keras.callbacks.Callback):
+    def __init__(self):
+        self.train_acc = []
+        self.val_acc = []
+        self.train_loss = []
+        self.val_loss = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.train_acc.append(logs.get('accuracy'))
+        self.val_acc.append(logs.get('val_accuracy'))
+        self.train_loss.append(logs.get('loss'))
+        self.val_loss.append(logs.get('val_loss'))
+
+        clear_output(wait=True)
+        plt.figure(figsize=(12, 4))
+
+        plt.subplot(1, 2, 1)
+        plt.plot(self.train_acc, label='Train Acc')
+        plt.plot(self.val_acc, label='Val Acc')
+        plt.title('Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.legend()
+
+        plt.subplot(1, 2, 2)
+        plt.plot(self.train_loss, label='Train Loss')
+        plt.plot(self.val_loss, label='Val Loss')
+        plt.title('Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+
+# Choose a variant from 1 to 10
+VARIANT = 4
+
+# ------------------------------
+# Configuration
+# ------------------------------
+DATASET_PATH = "DATASET_PATH/output3"  # <- Replace with your real path
+IMG_HEIGHT, IMG_WIDTH = 224, 224
+NUM_CHANNELS = 19
+NUM_CLASSES = 3
+BATCH_SIZEE = 32
+SEG_PER_CLASS = 2000
+WORKERS = 16
+EPOCHS = 25
+
+import os
+import datetime
+import random
+import numpy as np
+from PIL import Image
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers, regularizers
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard
+from tensorflow.keras.utils import Sequence
+from sklearn.model_selection import train_test_split
+
+# Dataset Generator
+class SegmentDataGenerator(Sequence):
+    def __init__(self, segment_paths, labels, batch_size=BATCH_SIZEE, shuffle=True):
+        self.segment_paths = segment_paths
+        self.labels = labels
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.on_epoch_end()
+
+    def __len__(self):
+        return len(self.segment_paths) // self.batch_size
+
+    def __getitem__(self, idx):
+        batch_paths = self.segment_paths[idx * self.batch_size:(idx + 1) * self.batch_size]
+        batch_labels = self.labels[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+        X_batch = [[] for _ in range(NUM_CHANNELS)]
+        y_batch = []
+
+        for segment_path, label in zip(batch_paths, batch_labels):
+            imgs = []
+            for ch in range(1, NUM_CHANNELS + 1):
+                img_path = os.path.join(segment_path, f"Channel_{ch:02d}.png")
+                img = Image.open(img_path).convert("RGB").resize((IMG_WIDTH, IMG_HEIGHT))
+                img_array = np.array(img) / 255.0
+                imgs.append(img_array)
+            for ch in range(NUM_CHANNELS):
+                X_batch[ch].append(imgs[ch])
+            y_batch.append(label)
+
+        X_batch = [np.array(ch_data) for ch_data in X_batch]
+        y_batch = np.array(y_batch)
+        return X_batch, y_batch
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            combined = list(zip(self.segment_paths, self.labels))
+            random.shuffle(combined)
+            self.segment_paths, self.labels = zip(*combined)
+
+# Dataset Loader
+
+def load_dataset_paths(dataset_path, max_segments_per_class=None):
+    segment_paths, labels = [], []
+    class_names = sorted(os.listdir(dataset_path))
+    class_to_idx = {cls: i for i, cls in enumerate(class_names)}
+    print("Class mapping:", class_to_idx)
+
+    for cls in class_names:
+        class_dir = os.path.join(dataset_path, cls)
+        segments = sorted(os.listdir(class_dir))[:max_segments_per_class]
+        for segment in segments:
+            segment_path = os.path.join(class_dir, segment)
+            if all(os.path.exists(os.path.join(segment_path, f"Channel_{ch:02d}.png")) for ch in range(1, NUM_CHANNELS + 1)):
+                segment_paths.append(segment_path)
+                labels.append(class_to_idx[cls])
+    return segment_paths, labels, class_names
+
+# EEG Branch Model (Variant Based)
+def build_branch():
+    act_fn = 'swish' if VARIANT in [2, 5, 7, 10] else 'gelu'
+    use_se = VARIANT in [4, 5, 8, 9, 10]
+    l2r = 1e-4 if VARIANT in [6, 7, 8, 10] else None
+    reg = regularizers.l2(l2r) if l2r else None
+
+    def squeeze_excitation(x, ratio=16):
+        filters = x.shape[-1]
+        se = layers.GlobalAveragePooling2D()(x)
+        se = layers.Dense(filters // ratio, activation='relu')(se)
+        se = layers.Dense(filters, activation='sigmoid')(se)
+        se = layers.Reshape((1, 1, filters))(se)
+        return layers.multiply([x, se])
+
+    def block(x, filters):
+        shortcut = x
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation(act_fn)(x)
+        x = layers.Conv2D(filters * 4, 1, kernel_regularizer=reg)(x)
+        x = layers.Dropout(0.3)(x, training=True)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation(act_fn)(x)
+        x = layers.Conv2D(filters, 1, kernel_regularizer=reg)(x)
+        if use_se:
+            x = squeeze_excitation(x)
+        return layers.Add()([x, shortcut])
+
+    inputs = layers.Input(shape=(IMG_HEIGHT, IMG_WIDTH, 3))
+    x = layers.Conv2D(48, 7, strides=7, padding='same', kernel_regularizer=reg)(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation(act_fn)(x)
+
+    x = block(x, 48)
+    x = layers.Conv2D(96, 2, strides=4, kernel_regularizer=reg)(x)
+    x = block(x, 96)
+    x = layers.Conv2D(192, 2, strides=4, kernel_regularizer=reg)(x)
+    x = block(x, 192)
+    x = layers.Conv2D(384, 2, strides=4, kernel_regularizer=reg)(x)
+    x = block(x, 384)
+    x = layers.GlobalAveragePooling2D()(x)
+
+    return models.Model(inputs, x, name="EEGBranch")
+
+# Complete Model
+
+def build_model():
+    branches = []
+    branch_model = build_branch()
+    for _ in range(NUM_CHANNELS):
+        inp = layers.Input(shape=(IMG_HEIGHT, IMG_WIDTH, 3))
+        feat = branch_model(inp)
+        branches.append((inp, feat))
+
+    inputs = [inp for inp, _ in branches]
+    features = [feat for _, feat in branches]
+    x = layers.Concatenate(axis=1)([layers.Reshape((1, 384))(f) for f in features])
+    scores = layers.Dense(1, activation='tanh')(x)
+    weights = layers.Softmax(axis=1)(scores)
+    fused = layers.Lambda(lambda t: tf.reduce_sum(t[0] * t[1], axis=1))([x, weights])
+    x = layers.Dense(256, activation='relu')(fused)
+    x = layers.Dropout(0.3)(x)
+    output = layers.Dense(NUM_CLASSES, activation='softmax')(x)
+    return models.Model(inputs, output)
+
+# Load and prepare data
+segment_paths, labels, class_names = load_dataset_paths(DATASET_PATH, max_segments_per_class=SEG_PER_CLASS)
+train_paths, val_paths, train_labels, val_labels = train_test_split(segment_paths, labels, test_size=0.2, stratify=labels)
+train_gen = SegmentDataGenerator(train_paths, train_labels)
+val_gen = SegmentDataGenerator(val_paths, val_labels, shuffle=False)
+
+# Compile model
+model = build_model()
+try:
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, label_smoothing=0.1 if VARIANT in [3, 5, 9, 10] else 0.0)
+except TypeError:
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False)
+model.compile(optimizer=optimizers.Adam(learning_rate=5e-5), loss=loss_fn, metrics=['accuracy'])
+
+# Logging and callbacks
+log_dir = "logs/fit/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+tensorboard_cb = TensorBoard(log_dir=log_dir)
+checkpoint_cb = ModelCheckpoint("best_model.h5", monitor="val_accuracy", save_best_only=True)
+early_stop_cb = EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True)
+
+live_plot = LivePlotCallback()
+print(f"\n🚀 Starting Training for VARIANT {VARIANT}...")
+model.fit(train_gen, validation_data=val_gen, epochs=EPOCHS,
+          callbacks=[tensorboard_cb, checkpoint_cb, early_stop_cb],
+          use_multiprocessing=True, workers=WORKERS, verbose=1)
+
+model.save(f"model_variant_{VARIANT}.h5")
+
+# Evaluate
+val_preds = model.predict(val_gen)
+val_true = np.array(val_labels)[:len(val_preds)]
+val_pred_classes = np.argmax(val_preds, axis=1)
+
+cm = confusion_matrix(val_true, val_pred_classes)
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=class_names, yticklabels=class_names)
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title(f"Confusion Matrix - Variant {VARIANT}")
+plt.tight_layout()
+plt.show()
